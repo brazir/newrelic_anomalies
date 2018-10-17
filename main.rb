@@ -3,7 +3,7 @@ require 'bundler/inline'
 gemfile do
   source 'https://rubygems.org'
   gem 'json', '~> 2.1.0'
-  gem 'curb', '~> 0.9.6'
+  gem 'httpclient', '~> 2.8', '>= 2.8.3'
   gem 'iso8601', '~> 0.12.0'
   gem 'colorize', '~> 0.8.1'
 end
@@ -25,14 +25,18 @@ METRIC_VALUES = ["average_response_time",
         "standard_deviation",
         "average_call_time"]
 
-def pullApplicationInfoAsMap(authToken)
+#DEBUG = STDOUT
+DEBUG = nil
+
+
+def pullApplicationInfoAsMap(httpHeaders, httpClient)
   applicationMap = Hash.new
   page = 1
   loop do 
-    response = Curl::Easy.http_get("https://api.newrelic.com/v2/applications.json?page=#{page}") do |curl|
-      curl.headers["x-api-key"] = "#{authToken}"
-    end
-    body = JSON.parse(response.body_str)
+    params = {"page" => page}
+    httpClient.debug_dev = DEBUG
+    response = httpClient.get("https://api.newrelic.com/v2/applications.json",params, httpHeaders)
+    body = JSON.parse(response.body)
     if body["applications"].length > 0
       applicationMap.merge!( (body["applications"].map{|app| [app["id"].to_i, app["name"] ]}).to_h )
     end
@@ -43,39 +47,52 @@ def pullApplicationInfoAsMap(authToken)
 end
 
 ##This will let you list out the current metrics to see what keys you can actually pull
-def pullMetricAvailableValues(authToken, applicationId)
-  response = Curl::Easy.http_get("https://api.newrelic.com/v2/applications/#{applicationId}/metrics.json") do |curl|
-    curl.headers["x-api-key"] = "#{authToken}"
-  end
-  tmpBody = JSON.parse(response.body_str)
+def pullMetricAvailableValues(httpHeaders, httpClient, applicationId)
+  params = {}
+  httpClient.debug_dev = DEBUG
+  response = httpClient.get("https://api.newrelic.com/v2/applications/#{applicationId}/metrics.json", params, httpHeaders)
+  tmpBody = JSON.parse(response.body)
   #puts JSON.pretty_generate(tmpBody)
   return tmpBody
 end
 
 ##Example of output from 10/15/2018
 ##{"name"=>"HttpDispatcher", "values"=>["average_response_time", "calls_per_minute", "call_count", "min_response_time", "max_response_time", "average_exclusive_time", "average_value", "total_call_time_per_minute", "requests_per_minute", "standard_deviation", "average_call_time"]}
-def pullMetricDataForApp(authToken, applicationId, metricName, values)
+def pullMetricDataForApp(httpHeaders, httpClient, applicationId, metricName, values)
   names =[metricName]
-  params = names.map{|name| "names[]=#{name}"}.join('&') + '&' + values.map{|value| "values[]=#{value}"}.join('&')
   summary = "true" #summary false gives you to the minute data
   toTime = Time.now.utc
   fromTime = toTime - (24 * 3600)
-
-  response = Curl::Easy.http_get("https://api.newrelic.com/v2/applications/#{applicationId}/metrics/data.json?#{params}&from=#{fromTime.iso8601}&to=#{toTime.iso8601}&summarize=#{summary}&raw=true") do |curl|
-    curl.headers["x-api-key"] = "#{authToken}"
-  end
-  tmpBody = JSON.parse(response.body_str)
+  params ={
+    "names[]" => names,
+    "values[]" => values,
+    "from" => fromTime.iso8601,
+    "to" => toTime.iso8601,
+    "summarize" => summary,
+    "raw" => true
+  }
+  httpClient.debug_dev = DEBUG
+  response = httpClient.get("https://api.newrelic.com/v2/applications/#{applicationId}/metrics/data.json", params, httpHeaders)
+  tmpBody = JSON.parse(response.body)
   #puts JSON.pretty_generate(tmpBody)
   return tmpBody
 end
 
 def presentMetricData(appId, appName, metricMap)
   #is it bad?
-  max = metricMap["max_response_time"]
-  avg = metricMap["average_response_time"]
-  avg105 = (avg * 1.05)
   color = :green
   errors = []
+  max = metricMap["max_response_time"]
+  avg = metricMap["average_response_time"]
+  avg105 = 0
+  if avg.nil? || max.nil?
+    color = :red
+    errors += ["There is no data for web requests"]
+    avg = 0
+    max = 0 
+  else
+    avg105 = (avg * 1.05)
+  end
   if (max > avg105 && ((max - avg) > 0.4)) 
     color = :red
     errors += ["max response time is too different from average"]
@@ -88,12 +105,12 @@ def presentMetricData(appId, appName, metricMap)
   end
 end
 
-appMap = pullApplicationInfoAsMap(TOKEN)
-appIds = appMap.keys
+httpClient = HTTPClient.new
 
-
+httpHeader = {'x-api-key' => TOKEN}
+appMap = pullApplicationInfoAsMap(httpHeader, HTTPClient.new)
 appMap.each{|appId, appName|
-  metricData = pullMetricDataForApp(TOKEN, appId, METRIC_NAME, METRIC_VALUES)
+  metricData = pullMetricDataForApp(httpHeader, HTTPClient.new, appId, METRIC_NAME, METRIC_VALUES)
   #we are only using a single slice because we have summarize turned off if you wanted to do data over time
   #turn off summarize and then you can get a minute by minute data set would require work here
   metricValues = metricData["metric_data"]["metrics"].map{|metricSet| 
@@ -102,8 +119,3 @@ appMap.each{|appId, appName|
   #puts JSON.pretty_generate(metricValues)
   presentMetricData(appId, appName, metricValues)
 }
-
-
-
-
-
