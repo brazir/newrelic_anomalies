@@ -29,13 +29,30 @@ METRIC_VALUES = ["average_response_time",
 DEBUG = nil
 
 
+def wrappedGet(httpClient, httpUrl, httpParams, httpHeaders)
+  response = nil
+  retry_num = 10
+  begin
+    httpClient.debug_dev = DEBUG
+    response = httpClient.get(httpUrl, httpParams, httpHeaders)
+  rescue => err
+    if retry_num > 0
+      retry_num -= 1
+      sleep(0.1)
+      retry
+    else
+      raise err
+    end
+  end
+  return response
+end
+
 def pullApplicationInfoAsMap(httpHeaders, httpClient)
   applicationMap = Hash.new
   page = 1
   loop do 
     params = {"page" => page}
-    httpClient.debug_dev = DEBUG
-    response = httpClient.get("https://api.newrelic.com/v2/applications.json",params, httpHeaders)
+    response = wrappedGet(httpClient, "https://api.newrelic.com/v2/applications.json", params, httpHeaders)
     body = JSON.parse(response.body)
     if body["applications"].length > 0
       applicationMap.merge!( (body["applications"].map{|app| [app["id"].to_i, app["name"] ]}).to_h )
@@ -50,7 +67,7 @@ end
 def pullMetricAvailableValues(httpHeaders, httpClient, applicationId)
   params = {}
   httpClient.debug_dev = DEBUG
-  response = httpClient.get("https://api.newrelic.com/v2/applications/#{applicationId}/metrics.json", params, httpHeaders)
+  response = wrappedGet(httpClient, "https://api.newrelic.com/v2/applications/#{applicationId}/metrics.json", params, httpHeaders)
   tmpBody = JSON.parse(response.body)
   #puts JSON.pretty_generate(tmpBody)
   return tmpBody
@@ -72,7 +89,7 @@ def pullMetricDataForApp(httpHeaders, httpClient, applicationId, metricName, val
     "raw" => true
   }
   httpClient.debug_dev = DEBUG
-  response = httpClient.get("https://api.newrelic.com/v2/applications/#{applicationId}/metrics/data.json", params, httpHeaders)
+  response = wrappedGet(httpClient, "https://api.newrelic.com/v2/applications/#{applicationId}/metrics/data.json", params, httpHeaders)
   tmpBody = JSON.parse(response.body)
   #puts JSON.pretty_generate(tmpBody)
   return tmpBody
@@ -93,9 +110,14 @@ def presentMetricData(appId, appName, metricMap)
   else
     avg105 = (avg * 1.05)
   end
-  if (max > avg105 && ((max - avg) > 0.4)) 
+  if (max > avg105 && ((max - avg) > 0.4) && max > 0.2 ) 
     color = :red
     errors += ["max response time is too different from average"]
+  end
+
+  if max == 0.0 && avg == 0.0
+    color =:red
+    errors +=["There does not appear to be any requests for this service look to delete"]
   end
   puts "Application: " + "#{appName}".colorize(:color => color)
 
@@ -110,12 +132,20 @@ httpClient = HTTPClient.new
 httpHeader = {'x-api-key' => TOKEN}
 appMap = pullApplicationInfoAsMap(httpHeader, HTTPClient.new)
 appMap.each{|appId, appName|
-  metricData = pullMetricDataForApp(httpHeader, HTTPClient.new, appId, METRIC_NAME, METRIC_VALUES)
+  doit = true
+  begin
+    metricData = pullMetricDataForApp(httpHeader, HTTPClient.new, appId, METRIC_NAME, METRIC_VALUES)
+  rescue => err
+    doit = false
+    puts "something bad happened with this app #{appName} when trying to pull metrics"
+  end
   #we are only using a single slice because we have summarize turned off if you wanted to do data over time
   #turn off summarize and then you can get a minute by minute data set would require work here
-  metricValues = metricData["metric_data"]["metrics"].map{|metricSet| 
-    metricSet["timeslices"].first["values"]
-  }.first
-  #puts JSON.pretty_generate(metricValues)
-  presentMetricData(appId, appName, metricValues)
+  if doit
+    metricValues = metricData["metric_data"]["metrics"].map{|metricSet| 
+      metricSet["timeslices"].first["values"]
+    }.first
+    #puts JSON.pretty_generate(metricValues)
+    presentMetricData(appId, appName, metricValues)
+  end
 }
